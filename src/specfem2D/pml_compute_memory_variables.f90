@@ -539,6 +539,261 @@
   endif
 
   end subroutine pml_compute_memory_variables_elastic
+  
+  !ADD PML for SH waves ZZD @ MIT
+  subroutine pml_compute_memory_variables_SH(ispec,nglob,displ_elastic_old, &
+                                                  dux_dxl,dux_dzl, &
+                                                  dux_dxl_prime,dux_dzl_prime, &
+                                                  PML_dux_dxl,PML_dux_dzl, &
+                                                  PML_dux_dxl_old,PML_dux_dzl_old)
+
+! for elastic elements
+
+  use constants, only: CUSTOM_REAL,NDIM,NGLLX,NGLLZ,NGLJ, &
+    CPML_X_ONLY,CPML_Z_ONLY,ALPHA_LDDRK,BETA_LDDRK,C_LDDRK
+
+  use specfem_par, only: time_stepping_scheme,i_stage,it,DT,deltat, &
+                         ibool,xix,xiz,gammax,gammaz, &
+                         hprime_xx,hprime_zz, &
+                         AXISYM,is_on_the_axis,hprimeBar_xx
+
+  use specfem_par, only: rmemory_dux_dx,rmemory_dux_dz, &
+                         rmemory_dux_dx_prime,rmemory_dux_dz_prime, &
+                         rmemory_dux_dx_LDDRK,rmemory_dux_dz_LDDRK
+
+  ! PML arrays
+  use specfem_par, only: nspec_PML,ispec_is_PML,spec_to_PML,region_CPML, &
+                K_x_store,K_z_store,d_x_store,d_z_store,alpha_x_store,alpha_z_store, &
+                ROTATE_PML_ACTIVATE
+
+  implicit none
+
+  integer,intent(in) :: ispec
+
+  integer,intent(in) :: nglob
+  real(kind=CUSTOM_REAL), dimension(NDIM,nglob),intent(in) :: displ_elastic_old
+
+  real(kind=CUSTOM_REAL), dimension(NGLLX,NGLLZ),intent(inout) :: dux_dxl,dux_dzl
+  real(kind=CUSTOM_REAL), dimension(NGLLX,NGLLZ),intent(out) :: dux_dxl_prime,dux_dzl_prime
+
+  real(kind=CUSTOM_REAL), dimension(NGLLX,NGLLZ),intent(out) :: PML_dux_dxl,PML_dux_dzl
+  real(kind=CUSTOM_REAL), dimension(NGLLX,NGLLZ),intent(out) :: PML_dux_dxl_old,PML_dux_dzl_old
+
+  ! local parameters
+  integer :: i,j,k
+  real(kind=CUSTOM_REAL) :: dux_dxi_old,dux_dgamma_old,duz_dxi_old,duz_dgamma_old
+  real(kind=CUSTOM_REAL) :: xixl,xizl,gammaxl,gammazl
+
+  ! PML
+  integer :: ispec_PML
+  integer :: CPML_region_local
+  double precision :: time_n,time_nsub1
+  double precision :: kappa_x,kappa_z,d_x,d_z,alpha_x,alpha_z,beta_x,beta_z
+  double precision :: A5,A6,A7
+  double precision :: bb_zx_1,bb_zx_2,coef0_zx_1,coef1_zx_1,coef2_zx_1,coef0_zx_2,coef1_zx_2,coef2_zx_2
+  double precision :: A8,A9,A10
+  double precision :: bb_xz_1,bb_xz_2,coef0_xz_1,coef1_xz_1,coef2_xz_1,coef0_xz_2,coef1_xz_2,coef2_xz_2
+
+  ! checks if anything to do in this slice
+  if (nspec_PML == 0) return
+  if (.not. ispec_is_PML(ispec)) return
+
+  do j = 1,NGLLZ
+    do i = 1,NGLLX
+      ! stores initial derivatives
+      PML_dux_dxl(i,j) = dux_dxl(i,j)
+      PML_dux_dzl(i,j) = dux_dzl(i,j)
+
+      if (AXISYM) then
+        if (is_on_the_axis(ispec) .and. i == 1) then
+          ! d_uz/dr=0 on the axis
+        !  PML_duz_dxl(i,j) = 0._CUSTOM_REAL
+        endif
+      endif
+
+      ! derivative along x and along z
+      !
+      ! first double loop over GLL points to compute and store gradients
+      ! we can merge the two loops because NGLLX == NGLLZ
+      dux_dxi_old = 0._CUSTOM_REAL
+      dux_dgamma_old = 0._CUSTOM_REAL
+      do k = 1,NGLLX
+        dux_dxi_old = dux_dxi_old + displ_elastic_old(1,ibool(k,j,ispec))*hprime_xx(i,k)
+        dux_dgamma_old = dux_dgamma_old + displ_elastic_old(1,ibool(i,k,ispec))*hprime_zz(j,k)
+      enddo
+
+      ! AXISYM overwrite dux_dxi and duz_dxi
+      if (AXISYM) then
+        if (is_on_the_axis(ispec)) then
+          dux_dxi_old = 0._CUSTOM_REAL
+          do k = 1,NGLJ
+            dux_dxi_old = dux_dxi_old + displ_elastic_old(1,ibool(k,j,ispec))*hprimeBar_xx(i,k)
+          enddo
+        endif
+      endif
+
+      ! derivatives of displacement
+      xixl = xix(i,j,ispec)
+      xizl = xiz(i,j,ispec)
+      gammaxl = gammax(i,j,ispec)
+      gammazl = gammaz(i,j,ispec)
+
+      PML_dux_dxl_old(i,j) = dux_dxi_old*xixl + dux_dgamma_old*gammaxl !dux_dxl_old
+      PML_dux_dzl_old(i,j) = dux_dxi_old*xizl + dux_dgamma_old*gammazl !dux_dzl_old
+
+      if (AXISYM) then
+        if (is_on_the_axis(ispec) .and. i == 1) then
+          ! d_uz/dr=0 on the axis
+          !PML_duz_dxl_old(i,j) = 0._CUSTOM_REAL
+        endif
+      endif
+    enddo
+  enddo
+
+  !------------------------------------------------------------------------------
+  !---------------------------- LEFT & RIGHT ------------------------------------
+  !------------------------------------------------------------------------------
+  ! timing
+  select case (time_stepping_scheme)
+  case (1)
+    ! Newmark
+    time_n = (it-1) * DT
+    time_nsub1 = (it-2) * DT
+  case (2)
+    ! LDDRK
+    time_n = (it-1) * DT + C_LDDRK(i_stage) * DT
+  case default
+    call stop_the_code('Sorry, time stepping scheme not implemented yet in PML memory variable updates')
+  end select
+
+  ! local PML element
+  ispec_PML = spec_to_PML(ispec)
+  CPML_region_local = region_CPML(ispec)
+
+  do j = 1,NGLLZ
+    do i = 1,NGLLX
+      kappa_x = K_x_store(i,j,ispec_PML)
+      kappa_z = K_z_store(i,j,ispec_PML)
+
+      d_x = d_x_store(i,j,ispec_PML)
+      d_z = d_z_store(i,j,ispec_PML)
+
+      alpha_x = alpha_x_store(i,j,ispec_PML)
+      alpha_z = alpha_z_store(i,j,ispec_PML)
+
+      beta_x = alpha_x + d_x / kappa_x
+      beta_z = alpha_z + d_z / kappa_z
+
+      ! gets PML coefficients
+      call lik_parameter_computation(DT,kappa_z,beta_z,alpha_z,kappa_x,beta_x,alpha_x, &
+                                     CPML_region_local,31,A5,A6,A7,bb_zx_1,bb_zx_2, &
+                                     coef0_zx_1,coef1_zx_1,coef2_zx_1,coef0_zx_2,coef1_zx_2,coef2_zx_2)
+
+      call lik_parameter_computation(DT,kappa_x,beta_x,alpha_x,kappa_z,beta_z,alpha_z, &
+                                     CPML_region_local,13,A8,A9,A10,bb_xz_1,bb_xz_2, &
+                                     coef0_xz_1,coef1_xz_1,coef2_xz_1,coef0_xz_2,coef1_xz_2,coef2_xz_2)
+
+      select case (time_stepping_scheme)
+      case (1)
+        ! Newmark
+        if (ROTATE_PML_ACTIVATE) then
+          rmemory_dux_dx(i,j,ispec_PML,1) = coef0_zx_1 * rmemory_dux_dx(i,j,ispec_PML,1) + &
+                                            coef1_zx_1 * PML_dux_dxl(i,j) + coef2_zx_1 * PML_dux_dxl_old(i,j)
+          rmemory_dux_dz(i,j,ispec_PML,1) = coef0_zx_1 * rmemory_dux_dz(i,j,ispec_PML,1) + &
+                                            coef1_zx_1 * PML_dux_dzl(i,j) + coef2_zx_1 * PML_dux_dzl_old(i,j)
+          rmemory_dux_dx_prime(i,j,ispec_PML,1) = coef0_xz_1 * rmemory_dux_dx_prime(i,j,ispec_PML,1) + &
+                                                  coef1_xz_1 * PML_dux_dxl(i,j) + coef2_xz_1 * PML_dux_dxl_old(i,j)
+          rmemory_dux_dz_prime(i,j,ispec_PML,1) = coef0_xz_1 * rmemory_dux_dz_prime(i,j,ispec_PML,1) + &
+                                                  coef1_xz_1 * PML_dux_dzl(i,j) + coef2_xz_1 * PML_dux_dzl_old(i,j)
+
+          rmemory_dux_dx(i,j,ispec_PML,2) = coef0_zx_2 * rmemory_dux_dx(i,j,ispec_PML,2) + &
+                                            coef1_zx_2 * PML_dux_dxl(i,j) + coef2_zx_2 * PML_dux_dxl_old(i,j)
+          rmemory_dux_dz(i,j,ispec_PML,2) = coef0_zx_2 * rmemory_dux_dz(i,j,ispec_PML,2) + &
+                                            coef1_zx_2 * PML_dux_dzl(i,j) + coef2_zx_2 * PML_dux_dzl_old(i,j)
+
+          rmemory_dux_dx_prime(i,j,ispec_PML,2) = coef0_xz_2 * rmemory_dux_dx_prime(i,j,ispec_PML,2) + &
+                                                  coef1_xz_2 * PML_dux_dxl(i,j) + coef2_xz_2 * PML_dux_dxl_old(i,j)
+          rmemory_dux_dz_prime(i,j,ispec_PML,2) = coef0_xz_2 * rmemory_dux_dz_prime(i,j,ispec_PML,2) + &
+                                                  coef1_xz_2 * PML_dux_dzl(i,j) + coef2_xz_2 * PML_dux_dzl_old(i,j)
+
+        else
+          ! non-rotated, element aligns with x/y/z-coordinates
+          rmemory_dux_dx(i,j,ispec_PML,1) = coef0_zx_1 * rmemory_dux_dx(i,j,ispec_PML,1) + &
+                                            coef1_zx_1 * PML_dux_dxl(i,j) + coef2_zx_1 * PML_dux_dxl_old(i,j)
+          rmemory_dux_dx(i,j,ispec_PML,2) = coef0_zx_2 * rmemory_dux_dx(i,j,ispec_PML,2) + &
+                                            coef1_zx_2 * PML_dux_dxl(i,j) + coef2_zx_2 * PML_dux_dxl_old(i,j)
+
+          rmemory_dux_dz(i,j,ispec_PML,1) = coef0_xz_1 * rmemory_dux_dz(i,j,ispec_PML,1) + &
+                                            coef1_xz_1 * PML_dux_dzl(i,j) + coef2_xz_1 * PML_dux_dzl_old(i,j)
+          rmemory_dux_dz(i,j,ispec_PML,2) = coef0_xz_2 * rmemory_dux_dz(i,j,ispec_PML,2) + &
+                                            coef1_xz_2 * PML_dux_dzl(i,j) + coef2_xz_2 * PML_dux_dzl_old(i,j)
+        endif ! ROTATE_PML_ACTIVATE
+
+      case (2)
+        ! LDDRK
+        rmemory_dux_dx_LDDRK(i,j,ispec_PML,1) = ALPHA_LDDRK(i_stage) * rmemory_dux_dx_LDDRK(i,j,ispec_PML,1) + &
+                                                deltat * (-bb_zx_1 * rmemory_dux_dx(i,j,ispec_PML,1) + PML_dux_dxl(i,j))
+        rmemory_dux_dx(i,j,ispec_PML,1) = rmemory_dux_dx(i,j,ispec_PML,1) + &
+                                          BETA_LDDRK(i_stage) * rmemory_dux_dx_LDDRK(i,j,ispec_PML,1)
+        rmemory_dux_dx_LDDRK(i,j,ispec_PML,2) = ALPHA_LDDRK(i_stage) * rmemory_dux_dx_LDDRK(i,j,ispec_PML,2) + &
+                                                deltat * (-bb_zx_2 * rmemory_dux_dx(i,j,ispec_PML,2) + PML_dux_dxl(i,j))
+        rmemory_dux_dx(i,j,ispec_PML,2) = rmemory_dux_dx(i,j,ispec_PML,2) + &
+                                          BETA_LDDRK(i_stage) * rmemory_dux_dx_LDDRK(i,j,ispec_PML,2)
+
+        rmemory_dux_dz_LDDRK(i,j,ispec_PML,1) = ALPHA_LDDRK(i_stage) * rmemory_dux_dz_LDDRK(i,j,ispec_PML,1) + &
+                                                deltat * (-bb_xz_1 * rmemory_dux_dz(i,j,ispec_PML,1) + PML_dux_dzl(i,j))
+        rmemory_dux_dz(i,j,ispec_PML,1) = rmemory_dux_dz(i,j,ispec_PML,1) + &
+                                          BETA_LDDRK(i_stage) * rmemory_dux_dz_LDDRK(i,j,ispec_PML,1)
+
+        rmemory_dux_dz_LDDRK(i,j,ispec_PML,2) = ALPHA_LDDRK(i_stage) * rmemory_dux_dz_LDDRK(i,j,ispec_PML,2) + &
+                                                deltat * (-bb_xz_2 * rmemory_dux_dz(i,j,ispec_PML,2) + PML_dux_dzl(i,j))
+        rmemory_dux_dz(i,j,ispec_PML,2) = rmemory_dux_dz(i,j,ispec_PML,2) + &
+                                          BETA_LDDRK(i_stage) * rmemory_dux_dz_LDDRK(i,j,ispec_PML,2)
+
+
+      case default
+        call stop_the_code('Time stepping scheme not implemented yet for elastic PML memory variable update')
+      end select
+
+      if (ROTATE_PML_ACTIVATE) then
+        dux_dxl(i,j) = A5 * PML_dux_dxl(i,j)  + A6 * rmemory_dux_dx(i,j,ispec_PML,1) + A6 * rmemory_dux_dx(i,j,ispec_PML,2)
+        dux_dzl(i,j) = A5 * PML_dux_dzl(i,j)  + A6 * rmemory_dux_dz(i,j,ispec_PML,1) + A6 * rmemory_dux_dz(i,j,ispec_PML,2)
+
+        dux_dxl_prime(i,j) = A8 * PML_dux_dxl(i,j) + &
+                             A9 * rmemory_dux_dx_prime(i,j,ispec_PML,1) + A10 * rmemory_dux_dx_prime(i,j,ispec_PML,2)
+        dux_dzl_prime(i,j) = A8 * PML_dux_dzl(i,j) + &
+                             A9 * rmemory_dux_dz_prime(i,j,ispec_PML,1) + A10 * rmemory_dux_dz_prime(i,j,ispec_PML,2)
+        
+      else
+        dux_dxl(i,j) = A5 * PML_dux_dxl(i,j) + A6 * rmemory_dux_dx(i,j,ispec_PML,1) + A7 * rmemory_dux_dx(i,j,ispec_PML,2)
+        dux_dzl(i,j) = A8 * PML_dux_dzl(i,j) + A9 * rmemory_dux_dz(i,j,ispec_PML,1) + A10 * rmemory_dux_dz(i,j,ispec_PML,2)
+      endif
+    enddo
+  enddo
+
+  ! AXISYM enforces zero derivatives on axis
+  if (AXISYM) then
+    if (is_on_the_axis(ispec)) then
+      ! d_uz/dr=0 on the axis
+      ! i == 1
+      do j = 1,NGLLZ
+       ! rmemory_duz_dx(1,j,ispec_PML,1) = 0._CUSTOM_REAL
+       ! rmemory_duz_dx(1,j,ispec_PML,2) = 0._CUSTOM_REAL
+       ! duz_dxl(1,j) = 0._CUSTOM_REAL
+        if (time_stepping_scheme == 2) then
+        !  rmemory_duz_dx_LDDRK(1,j,ispec_PML,1) = 0._CUSTOM_REAL
+        !  rmemory_duz_dx_LDDRK(1,j,ispec_PML,2) = 0._CUSTOM_REAL
+        endif
+        if (ROTATE_PML_ACTIVATE) then
+         ! duz_dxl_prime(1,j) = 0._CUSTOM_REAL
+         ! rmemory_duz_dx_prime(1,j,ispec_PML,1) = 0._CUSTOM_REAL
+         ! rmemory_duz_dx_prime(1,j,ispec_PML,2) = 0._CUSTOM_REAL
+        endif
+      enddo
+    endif
+  endif
+
+  end subroutine pml_compute_memory_variables_SH
 
 !
 !-------------------------------------------------------------------------------------
